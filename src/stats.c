@@ -226,6 +226,39 @@ static void statsBuckets(StatsReport *p, time_t tNow){
 }
 
 /*
+** Fill in p->nPrevWord and p->nPrevSec, the totals for the period of
+** the same length that came just before the period of report p, so
+** that the two can be compared.  The buckets of p must already be
+** filled in.  Return an SQLite result code.
+*/
+static int statsPrevious(StatsReport *p, time_t tNow){
+  static const char zSql[] =
+    "SELECT coalesce(sum(nAdded-nDeleted),0), coalesce(sum(nSecond),0)"
+    " FROM daily WHERE day>=?1 AND day<?2";
+  sqlite3_stmt *pStmt = 0;        /* The query */
+  struct tm s;                    /* First day of the earlier period */
+  char zFrom[16];                 /* The same, as text */
+  int rc;                         /* Result code */
+
+  if( p->ePeriod==BE_YEAR ){
+    statsDate(tNow, 0, 2*p->nBucket-1, &s);
+    strftime(zFrom, sizeof(zFrom), "%Y-%m", &s);
+  }else{
+    statsDate(tNow, 2*p->nBucket-1, 0, &s);
+    strftime(zFrom, sizeof(zFrom), "%Y-%m-%d", &s);
+  }
+  rc = sqlite3_prepare_v2(stats.db, zSql, -1, &pStmt, 0);
+  if( rc!=SQLITE_OK ) return rc;
+  sqlite3_bind_text(pStmt, 1, zFrom, -1, SQLITE_STATIC);
+  sqlite3_bind_text(pStmt, 2, p->a[0].zKey, -1, SQLITE_STATIC);
+  if( sqlite3_step(pStmt)==SQLITE_ROW ){
+    p->nPrevWord = sqlite3_column_int64(pStmt, 0);
+    p->nPrevSec = sqlite3_column_int64(pStmt, 1);
+  }
+  return sqlite3_finalize(pStmt);
+}
+
+/*
 ** Generate a report covering period ePeriod (one of BE_WEEK, BE_MONTH,
 ** or BE_YEAR) ending today and write it into *p.
 **
@@ -279,5 +312,6 @@ int beStatsReport(int ePeriod, StatsReport *p){
   }
   p->nWord = p->nAdded - p->nDeleted;
   rc = sqlite3_finalize(pStmt);
+  if( rc==SQLITE_OK ) rc = statsPrevious(p, tNow);
   return rc;
 }

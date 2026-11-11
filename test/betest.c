@@ -315,6 +315,8 @@ static void testStats(const char *zFile){
   EXPECT_INT( r.nWord, 490 );
   EXPECT_INT( r.nSec, 1920 );
   EXPECT_INT( r.nActive, 3 );
+  EXPECT_INT( r.nPrevWord, 0 );
+  EXPECT_INT( r.nPrevSec, 0 );
 
   /* The month */
   EXPECT_INT( beStatsReport(BE_MONTH, &r), 0 );
@@ -328,6 +330,8 @@ static void testStats(const char *zFile){
   EXPECT_INT( r.nWord, 690 );
   EXPECT_INT( r.nSec, 2520 );
   EXPECT_INT( r.nActive, 4 );
+  EXPECT_INT( r.nPrevWord, 300 );
+  EXPECT_INT( r.nPrevSec, 0 );
 
   /* The year */
   EXPECT_INT( beStatsReport(BE_YEAR, &r), 0 );
@@ -345,6 +349,16 @@ static void testStats(const char *zFile){
   EXPECT_INT( r.nWord, 1990 );
   EXPECT_INT( r.nSec, 6120 );
   EXPECT_INT( r.nActive, 6 );
+  EXPECT_INT( r.nPrevWord, 9999 );
+  EXPECT_INT( r.nPrevSec, 0 );
+
+  /* The week that ended on 2026-10-19 follows one with 300 net words */
+  setDate(2026, 10, 19);
+  EXPECT_INT( beStatsReport(BE_WEEK, &r), 0 );
+  EXPECT_INT( r.nWord, 200 );
+  EXPECT_INT( r.nPrevWord, 300 );
+  EXPECT_INT( r.nPrevSec, 0 );
+  setDate(2026, 11, 11);
 
   /* Month arithmetic at the end of a long month, and in January */
   setDate(2026, 3, 31);

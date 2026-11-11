@@ -17,6 +17,7 @@ LIBS    = -framework Cocoa -lsqlite3 -lobjc
 BUILD   = build
 APP     = $(BUILD)/BestEdit.app
 EXE     = $(APP)/Contents/MacOS/BestEdit
+ICON    = $(APP)/Contents/Resources/BestEdit.icns
 
 # Source that is portable C, and source that needs macOS.
 CORE    = src/wordcount.c src/util.c src/stats.c src/rtfrepair.c
@@ -26,9 +27,26 @@ HDR     = src/bestedit.h src/cocoa.h
 
 all: $(APP)
 
-$(APP): $(EXE) $(APP)/Contents/Info.plist
+$(APP): $(EXE) $(APP)/Contents/Info.plist $(ICON)
 	codesign --force --sign - $(APP)
 	touch $(APP)
+
+# The application icon is drawn by a program, tools/mkicon.c, and then
+# packed into an .icns file.
+$(BUILD)/mkicon: tools/mkicon.c
+	mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $(BUILD)/mkicon tools/mkicon.c \
+	    -framework CoreGraphics -framework ImageIO -framework CoreFoundation
+
+$(BUILD)/BestEdit.icns: $(BUILD)/mkicon
+	rm -rf $(BUILD)/BestEdit.iconset
+	mkdir -p $(BUILD)/BestEdit.iconset
+	$(BUILD)/mkicon $(BUILD)/BestEdit.iconset
+	iconutil -c icns -o $(BUILD)/BestEdit.icns $(BUILD)/BestEdit.iconset
+
+$(ICON): $(BUILD)/BestEdit.icns
+	mkdir -p $(APP)/Contents/Resources
+	cp $(BUILD)/BestEdit.icns $(ICON)
 
 $(EXE): $(CORE) $(MAC) $(HDR)
 	mkdir -p $(APP)/Contents/MacOS
@@ -52,9 +70,10 @@ TESTAPP = $(BUILD)/uitest/BestEdit.app
 TESTEXE = $(TESTAPP)/Contents/MacOS/BestEdit
 TESTSRC = test/uitest.c test/rtftest.c
 
-$(TESTEXE): $(CORE) $(MAC) $(HDR) $(TESTSRC) Info.plist
+$(TESTEXE): $(CORE) $(MAC) $(HDR) $(TESTSRC) Info.plist $(BUILD)/BestEdit.icns
 	rm -rf $(BUILD)/uitest
-	mkdir -p $(TESTAPP)/Contents/MacOS
+	mkdir -p $(TESTAPP)/Contents/MacOS $(TESTAPP)/Contents/Resources
+	cp $(BUILD)/BestEdit.icns $(TESTAPP)/Contents/Resources/BestEdit.icns
 	sed 's/com.bestedit.BestEdit/com.bestedit.BestEditTest/' Info.plist \
 	    > $(TESTAPP)/Contents/Info.plist
 	$(CC) $(CFLAGS) -DBE_TEST -o $(TESTEXE) $(CORE) $(MAC) $(TESTSRC) $(LIBS)

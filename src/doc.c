@@ -36,9 +36,10 @@
 #define DOC_BAR_HEIGHT  24.0
 
 /*
-** UTF-8 for the dot that separates items in the status bar.
+** The space that separates the word count from the character count in
+** the status bar.
 */
-#define MIDDOT "\xc2\xb7"
+#define DOC_COUNT_GAP "    "
 
 /*
 ** Each open document is represented by an instance of the following
@@ -130,8 +131,8 @@ static void edRecount(Editor *p){
 ** and some text is selected, the count for the selection is shown as
 ** well.  Ex:
 **
-**     1,234 words . 7,001 characters
-**     12 of 1,234 words . 64 of 7,001 characters
+**     1,234 words    7,001 characters
+**     12 of 1,234 words    64 of 7,001 characters
 **
 ** The selection is clipped to the text, because in the midst of an
 ** edit the selection can briefly extend past the end of the text.
@@ -165,12 +166,12 @@ static void edShowCount(Editor *p, int bSelection){
   beFmtInt(p->nWord, zW);
   beFmtInt(p->nChar, zC);
   if( bSel ){
-    snprintf(zMsg, sizeof(zMsg), "%s of %s %s  " MIDDOT "  %s of %s %s",
+    snprintf(zMsg, sizeof(zMsg), "%s of %s %s" DOC_COUNT_GAP "%s of %s %s",
              beFmtInt(nSelWord, zSW), zW, p->nWord==1 ? "word" : "words",
              beFmtInt(nSelChar, zSC), zC,
              p->nChar==1 ? "character" : "characters");
   }else{
-    snprintf(zMsg, sizeof(zMsg), "%s %s  " MIDDOT "  %s %s",
+    snprintf(zMsg, sizeof(zMsg), "%s %s" DOC_COUNT_GAP "%s %s",
              zW, p->nWord==1 ? "word" : "words",
              zC, p->nChar==1 ? "character" : "characters");
   }

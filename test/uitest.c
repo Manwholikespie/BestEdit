@@ -10,7 +10,8 @@
 ** and the statistics, saves and reopens the document, opens the
 ** statistics window, and so forth.  A picture of each window is written
 ** into the directory as a PNG file, and one line is printed for each
-** check.  The exit code is zero if every check passes.
+** check.  The exit code is zero if every check passes.  Setting
+** BESTEDIT_APPEARANCE to "light" or "dark" forces that appearance.
 **
 ** The steps are run from a timer, a fraction of a second apart, so
 ** that the event loop gets to run between one step and the next just
@@ -192,19 +193,19 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
       if( pDoc==0 ) exit(1);
       nBaseWord = weekWords();
       checkLabel(beTestDocCount(pDoc),
-                 "0 words  \xc2\xb7  0 characters", "empty count");
+                 "0 words    0 characters", "empty count");
       check(!beTimerIsRunning(), "timer idle at launch");
 
       /* Typing updates the count, the statistics, and starts the timer */
       typeText(pDoc, "The quick brown fox jumps over the lazy dog. ", -1, 0);
       checkLabel(beTestDocCount(pDoc),
-                 "9 words  \xc2\xb7  45 characters", "count after typing");
+                 "9 words    45 characters", "count after typing");
       check(weekWords()==nBaseWord+9, "nine words recorded");
       check(beTimerIsRunning(), "typing starts the timer");
       typeText(pDoc, "\nSecond paragraph, in which nothing much happens "
                      "\xe2\x80\x94 at least not yet.\n", -1, 0);
       checkLabel(beTestDocCount(pDoc),
-                 "20 words  \xc2\xb7  112 characters", "count, two paragraphs");
+                 "20 words    112 characters", "count, two paragraphs");
 
       /* Make it rich: a bold word and a large first line */
       r.location = 4;
@@ -215,7 +216,7 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
       r.length = 11;
       msg1(void, beTestDocText(pDoc), "setSelectedRange:", NSRange, r);
       checkLabel(beTestDocCount(pDoc),
-                 "2 of 20 words  \xc2\xb7  11 of 112 characters",
+                 "2 of 20 words    11 of 112 characters",
                  "count of selection");
       break;
     }
@@ -234,7 +235,7 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
       r.length = 0;
       msg1(void, beTestDocText(pDoc), "setSelectedRange:", NSRange, r);
       checkLabel(beTestDocCount(pDoc),
-                 "19 words  \xc2\xb7  108 characters", "count after delete");
+                 "19 words    108 characters", "count after delete");
 
       /* Undo changes the text without the text view announcing it.
       ** The count and the statistics must follow anyway.  How much is
@@ -243,7 +244,7 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
       msg0(void, msg0(id, pDoc, "undoManager"), "undo");
       nWord = beTestDocWords(pDoc, &nChar);
       check(nWord==20 || nWord==0, "undo changes the text");
-      snprintf(zExpect, sizeof(zExpect), "%s words  \xc2\xb7  %s characters",
+      snprintf(zExpect, sizeof(zExpect), "%s words    %s characters",
                beFmtInt(nWord, zW), beFmtInt(nChar, zC));
       checkLabel(beTestDocCount(pDoc), zExpect, "count after undo");
       check(weekWords()==nBaseWord+nWord, "net words after undo");
@@ -251,7 +252,7 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
       /* Redo puts things back as they were before the undo */
       msg0(void, msg0(id, pDoc, "undoManager"), "redo");
       checkLabel(beTestDocCount(pDoc),
-                 "19 words  \xc2\xb7  108 characters", "count after redo");
+                 "19 words    108 characters", "count after redo");
       check(weekWords()==nBaseWord+19, "net words after redo");
 
       /* Save as RTF, and write a plain text file to open */
@@ -276,7 +277,7 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
         NSRange rEff;
         id pStore = msg0(id, beTestDocText(pRtf), "textStorage");
         checkLabel(beTestDocCount(pRtf),
-                   "19 words  \xc2\xb7  108 characters", "count of RTF");
+                   "19 words    108 characters", "count of RTF");
         if( msg0(unsigned long, pStore, "length")<10 ) exit(1);
         pFont = msg3(id, pStore, "attribute:atIndex:effectiveRange:",
                      id, NSFontAttributeName, unsigned long, 2,
@@ -291,7 +292,7 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
       check(pTxt!=0, "open text file");
       if( pTxt ){
         checkLabel(beTestDocCount(pTxt),
-                   "4 words  \xc2\xb7  20 characters", "count of text file");
+                   "4 words    20 characters", "count of text file");
         check(!msg0(BOOL, beTestDocText(pTxt), "isRichText"),
               "text file is plain");
         typeText(pTxt, "more ", 0, 0);
@@ -344,8 +345,36 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
       break;
     }
     case 8: {
-      StatsReport rep;
+      /* With the mouse over a bar, the panel shows that bar alone */
       snapshot(beTestStatsWindow(), "stats-year.png");
+      beStatsWinSetPeriod(BE_WEEK);
+      beTestStatsHover(0, 6);
+      break;
+    }
+    case 9: {
+      snapshot(beTestStatsWindow(), "stats-hover.png");
+      beTestStatsHover(0, -1);
+      msg1(void, pApp, "orderFrontStandardAboutPanel:", id, (id)0);
+      break;
+    }
+    case 10: {
+      /* The About panel is the only panel that is open */
+      StatsReport rep;
+      id aWin = msg0(id, pApp, "windows");
+      id pAbout = 0;
+      unsigned long i, n = msg0(unsigned long, aWin, "count");
+      for(i=0; i<n; i++){
+        id pWin = msg1(id, aWin, "objectAtIndex:", unsigned long, i);
+        if( msg0(BOOL, pWin, "isVisible")
+         && msg1(BOOL, pWin, "isKindOfClass:", id, cls("NSPanel")) ){
+          pAbout = pWin;
+        }
+      }
+      check(pAbout!=0, "About panel opens");
+      if( pAbout ){
+        snapshot(pAbout, "about.png");
+        msg0(void, pAbout, "close");
+      }
 
       /* By now the timer has run for a few seconds.  Pausing it writes
       ** the time to the database. */
@@ -387,8 +416,18 @@ static void testStep(CFRunLoopTimerRef pTimer, void *NotUsed){
 */
 void beUiTestStart(void){
   CFRunLoopTimerRef pTimer;
+  const char *zLook = getenv("BESTEDIT_APPEARANCE");
   zOutDir = getenv("BESTEDIT_UITEST");
   if( zOutDir==0 || zOutDir[0]==0 ) return;
+  if( zLook ){
+    /* Force the light or the dark appearance, whatever the system
+    ** setting, so that both can be inspected. */
+    id zName = strcmp(zLook, "dark")==0 ? S("NSAppearanceNameDarkAqua")
+                                        : S("NSAppearanceNameAqua");
+    msg1(void, msg0(id, cls("NSApplication"), "sharedApplication"),
+         "setAppearance:", id,
+         msg1(id, cls("NSAppearance"), "appearanceNamed:", id, zName));
+  }
   pTimer = CFRunLoopTimerCreate(0, CFAbsoluteTimeGetCurrent()+1.5, 0.7, 0, 0,
                                 testStep, 0);
   CFRunLoopAddTimer(CFRunLoopGetMain(), pTimer, kCFRunLoopCommonModes);

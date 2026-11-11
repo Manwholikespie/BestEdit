@@ -66,26 +66,6 @@ static void appShowStats(id self, SEL NotUsed, id pSender){
 }
 
 /*
-** The action of the Week/Month/Year selector in the statistics window.
-*/
-static void appStatsPeriod(id self, SEL NotUsed, id pSender){
-  UNUSED_PARAMETER(self);
-  UNUSED_PARAMETER(NotUsed);
-  beStatsWinSetPeriod((int)msg0(long, pSender, "selectedSegment"));
-}
-
-/*
-** The delegate is also the delegate of the statistics window.  Bring
-** the statistics up to date whenever that window comes to the front.
-*/
-static void appWindowDidBecomeKey(id self, SEL NotUsed, id pNote){
-  UNUSED_PARAMETER(self);
-  UNUSED_PARAMETER(NotUsed);
-  UNUSED_PARAMETER(pNote);
-  beStatsWinRefresh();
-}
-
-/*
 ** The application is about to exit.  Record any time that the timer has
 ** not yet written to the database.
 */
@@ -122,10 +102,6 @@ static void mainCreateDelegate(void){
                   (IMP)appToggleAuto, "v@:@");
   class_addMethod(pClass, sel_registerName("showStats:"),
                   (IMP)appShowStats, "v@:@");
-  class_addMethod(pClass, sel_registerName("statsPeriod:"),
-                  (IMP)appStatsPeriod, "v@:@");
-  class_addMethod(pClass, sel_registerName("windowDidBecomeKey:"),
-                  (IMP)appWindowDidBecomeKey, "v@:@");
   class_addMethod(pClass, sel_registerName("applicationWillTerminate:"),
                   (IMP)appWillTerminate, "v@:@");
   class_addMethod(pClass,

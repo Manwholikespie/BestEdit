@@ -4,21 +4,29 @@
 ** This file implements the statistics window.
 **
 ** The window shows how much was written, and how much time was spent
-** writing, over the past week, month, or year.  From top to bottom it
-** contains:
+** writing, over the past week, month, or year.  The period is chosen
+** with a control in the toolbar.  Below the toolbar are two panels, one
+** for words and one for time.  Words and time get separate panels
+** because they are measured in different units and so cannot share an
+** axis.  Each panel shows:
 **
-**    *  A selector for the period.
-**    *  A row of four headline numbers.
-**    *  A bar chart of words written.
-**    *  A bar chart of time spent.
+**    *  The total for the period.
+**    *  How that compares with the period before.
+**    *  A sentence about the average day.
+**    *  A bar chart with one bar per day, or per month for a year.
 **
-** Words and time are drawn as two separate charts because they are
-** measured in different units and so cannot share an axis.
+** While the mouse is over a bar, the other bars fade and the total
+** gives way to the value and the date of that one bar.
 **
-** The charts are instances of BeChartView, a subclass of NSView that is
-** created here at run time.  The only instance variable of BeChartView
-** is a pointer to a Chart structure.  Shapes are drawn with
-** CoreGraphics, which is a C API.
+** Each panel is an instance of BeChartView, a subclass of NSView that
+** is created here at run time, and each panel draws all of its own
+** content.  The only instance variable of BeChartView is a pointer to
+** a Chart structure.  Shapes are drawn with CoreGraphics, which is a C
+** API.
+**
+** The toolbar needs a delegate, and the period control needs a target.
+** Both are the single instance of BeStatsController, another class
+** created here.
 */
 #include "cocoa.h"
 #include "bestedit.h"
@@ -29,20 +37,22 @@
 /*
 ** The size of the content of the window and the layout of its parts.
 */
-#define SW_WIDTH        640.0
-#define SW_HEIGHT       520.0
-#define SW_MARGIN       24.0
-#define SW_CHART_HEIGHT 176.0
-#define SW_NTILE        4
+#define SW_WIDTH        600.0     /* Width of the content */
+#define SW_MARGIN       28.0      /* Space to the left and right */
+#define SW_PANEL        250.0     /* Height of each panel */
+#define SW_GAP          30.0      /* Space between the panels */
+#define SW_TOP          14.0      /* Space above the first panel */
+#define SW_BOTTOM       22.0      /* Space below the second panel */
+#define SW_HEIGHT       (2*SW_PANEL + SW_GAP + SW_TOP + SW_BOTTOM)
 
 /*
-** Margins around the plot area of a chart: room for the axis labels on
-** the left and bottom and for the title on top.
+** The layout of a panel.  The plot is the rectangle that the bars
+** stand in.  To its right is a gutter for the labels of the grid
+** lines, and below it is a strip for the labels of the bars.
 */
-#define CHART_LEFT      52.0
-#define CHART_RIGHT     4.0
-#define CHART_TOP       34.0
-#define CHART_BOTTOM    20.0
+#define CHART_GUTTER    46.0      /* Width of the gutter */
+#define CHART_BOTTOM    22.0      /* Height of the strip of labels */
+#define CHART_HEAD      92.0      /* Height of the text above the plot */
 
 /*
 ** What a chart measures.
@@ -52,22 +62,25 @@
 
 /*
 ** The name under which the selected period is saved in the user
-** defaults.
+** defaults, and the identifier of the period control in the toolbar.
 */
-#define SW_PERIOD_KEY CFSTR("StatsPeriod")
+#define SW_PERIOD_KEY   CFSTR("StatsPeriod")
+#define SW_PERIOD_ITEM  S("BePeriod")
 
 /*
-** UTF-8 for a proper minus sign and for an em-dash.
+** UTF-8 for a proper minus sign and for arrows.
 */
-#define MINUS  "\xe2\x88\x92"
-#define EMDASH "\xe2\x80\x94"
+#define MINUS     "\xe2\x88\x92"
+#define ARROW_UP  "\xe2\x86\x91"
+#define ARROW_DN  "\xe2\x86\x93"
 
 /*
-** Each chart is described by an instance of the following structure.
+** Each panel is described by an instance of the following structure.
 */
 typedef struct Chart Chart;
 struct Chart {
   int eUnit;                      /* CHART_WORDS or CHART_TIME */
+  int iHover;                     /* Bar under the mouse, or -1 for none */
   const StatsReport *pReport;     /* The data to display */
 };
 
@@ -76,9 +89,9 @@ struct Chart {
 */
 static struct StatsWin {
   id pWin;                        /* The window, or NULL if never shown */
-  id pPeriod;                     /* The Week/Month/Year selector */
-  id aValue[SW_NTILE];            /* The headline numbers */
-  id aChart[2];                   /* The two charts */
+  id pCtrl;                       /* The BeStatsController */
+  id pPeriod;                     /* The Week/Month/Year control */
+  id aChart[2];                   /* The two panels */
   int ePeriod;                    /* The period currently selected */
   StatsReport report;             /* The report currently displayed */
 } sw;
@@ -102,11 +115,17 @@ static double chartValue(const Chart *p, int i){
 }
 
 /*
-** Render value r in the units of chart p.  Ex: "1,250" or "1h 05m"
+** Render n, a count of words or of seconds according to eUnit, as
+** text.  A negative count of words gets a proper minus sign.
 */
-static char *chartFormat(const Chart *p, double r, char *zBuf){
-  if( p->eUnit==CHART_TIME ) return beFmtDuration((i64)r, zBuf);
-  return beFmtInt((i64)r, zBuf);
+static char *chartFormat(int eUnit, i64 n, char *zBuf){
+  char zNum[32];
+  if( eUnit==CHART_TIME ) return beFmtDuration(n, zBuf);
+  if( n<0 ){
+    snprintf(zBuf, 40, MINUS "%s", beFmtInt(-n, zNum));
+    return zBuf;
+  }
+  return beFmtInt(n, zBuf);
 }
 
 /*
@@ -136,6 +155,30 @@ static double chartTop(double rMax, int eUnit){
     if( rMax<=r*4.0 ) return r*4.0;
     r *= 10.0;
   }
+}
+
+/*
+** Return the font for the large number at the top of a panel: the
+** system font in its rounded design, which is what the system itself
+** uses for the numbers in its own charts.
+*/
+static id chartBigFont(void){
+  id pFont = beFont(30.0, NSFontWeightSemibold, 0);
+  id pDesc = msg1(id, msg0(id, pFont, "fontDescriptor"),
+                  "fontDescriptorWithDesign:",
+                  id, NSFontDescriptorSystemDesignRounded);
+  id pRound = pDesc ? msg2(id, cls("NSFont"), "fontWithDescriptor:size:",
+                           id, pDesc, double, 30.0) : (id)0;
+  return pRound ? pRound : pFont;
+}
+
+/*
+** Return a dictionary of text attributes: font pFont in the system
+** color named zColor.
+*/
+static id chartAttr(id pFont, const char *zColor){
+  return beDict(NSFontAttributeName, pFont,
+                NSForegroundColorAttributeName, beColor(zColor));
 }
 
 /*
@@ -174,6 +217,122 @@ static void chartBar(CGContextRef c, double x, double y, double w, double h){
 }
 
 /*
+** Stroke a horizontal line one point thick from x0 to x1 at height y
+** in the system color named zColor.  The line is dashed if bDash.
+*/
+static void chartLine(CGContextRef c, double x0, double x1, double y,
+                      const char *zColor, int bDash){
+  static const CGFloat aDash[2] = { 2.0, 3.0 };
+  CGContextSetStrokeColorWithColor(c,
+      msg0(CGColorRef, beColor(zColor), "CGColor"));
+  CGContextSetLineWidth(c, 1.0);
+  CGContextSetLineDash(c, 0.0, aDash, bDash ? 2 : 0);
+  CGContextBeginPath(c);
+  CGContextMoveToPoint(c, x0, y);
+  CGContextAddLineToPoint(c, x1, y);
+  CGContextStrokePath(c);
+  CGContextSetLineDash(c, 0.0, 0, 0);
+}
+
+/*
+** Write into zBuf a phrase that compares nNow, the total for the
+** current period, against nPrev, the total for the period before.
+** Ex: "(up arrow) 12% from last week".  The result is an empty string
+** if there is nothing to compare against.
+*/
+static void chartCompare(i64 nNow, i64 nPrev, int ePeriod, char *zBuf,
+                         int nBuf){
+  static const char *azSince[] = {
+    "last week", "the 30 days before", "the 12 months before"
+  };
+  char zPct[32];                  /* The percentage */
+  i64 nPct;                       /* Change, in percent */
+
+  zBuf[0] = 0;
+  if( nPrev<=0 || nNow<0 ) return;
+  nPct = ((nNow - nPrev)*100 + (nNow>=nPrev ? nPrev/2 : -(nPrev/2)))/nPrev;
+  if( nPct==0 ){
+    snprintf(zBuf, nBuf, "Same as %s", azSince[ePeriod]);
+  }else{
+    snprintf(zBuf, nBuf, "%s %s%% from %s", nPct>0 ? ARROW_UP : ARROW_DN,
+             beFmtInt(nPct>0 ? nPct : -nPct, zPct), azSince[ePeriod]);
+  }
+}
+
+/*
+** Draw the text at the top of the panel of chart p: a caption, a large
+** number, a comparison with the previous period, and a sentence about
+** the average day.  b is the bounds of the panel.
+**
+** If the mouse is over a bar, the caption is the date of that bar, the
+** number is its value, and the rest is omitted.
+*/
+static void chartHeader(Chart *p, NSRect b){
+  const StatsReport *pRep = p->pReport;
+  id pBig = chartBigFont();       /* Font of the large number */
+  id pUnit = beFont(15.0, NSFontWeightMedium, 0);
+  id pSmall = beFont(12.0, NSFontWeightRegular, 1);
+  double yTop = b.size.height;    /* Top of the panel */
+  double yBig = yTop - 58.0;      /* Where the large number goes */
+  double x;                       /* Right edge of the large number */
+  i64 n;                          /* The number to show */
+  const char *zCaption;           /* The caption */
+  char zNum[40];                  /* The number as text */
+  char zLine[160];                /* A line of small text */
+  char zAvg[40];                  /* An average as text */
+
+  if( p->iHover>=0 ){
+    const StatsBucket *pB = &pRep->a[p->iHover];
+    zCaption = pB->zLong;
+    n = p->eUnit==CHART_TIME ? pB->nSec : pB->nWord;
+  }else{
+    zCaption = p->eUnit==CHART_TIME ? "Time writing" : "Words written";
+    n = p->eUnit==CHART_TIME ? pRep->nSec : pRep->nWord;
+  }
+  chartText(zCaption, 0.0, yTop-18.0, NSTextAlignmentLeft,
+            chartAttr(beFont(13.0, NSFontWeightMedium, 0),
+                      "secondaryLabelColor"));
+  x = chartText(chartFormat(p->eUnit, n, zNum), 0.0, yBig,
+                NSTextAlignmentLeft, chartAttr(pBig, "labelColor"));
+  if( p->eUnit==CHART_WORDS ){
+    /* The unit follows the number in smaller type on the same baseline */
+    double rDrop = msg0(double, pUnit, "descender")
+                 - msg0(double, pBig, "descender");
+    chartText(n==1 ? "word" : "words", x+6.0, yBig+rDrop,
+              NSTextAlignmentLeft, chartAttr(pUnit, "secondaryLabelColor"));
+  }
+  if( p->iHover>=0 ) return;
+
+  if( p->eUnit==CHART_TIME ){
+    chartCompare(pRep->nSec, pRep->nPrevSec, pRep->ePeriod, zLine,
+                 sizeof(zLine));
+  }else{
+    chartCompare(pRep->nWord, pRep->nPrevWord, pRep->ePeriod, zLine,
+                 sizeof(zLine));
+  }
+  chartText(zLine, b.size.width, yBig+8.0, NSTextAlignmentRight,
+            chartAttr(pSmall, "secondaryLabelColor"));
+
+  zLine[0] = 0;
+  if( pRep->nActive>0 && p->eUnit==CHART_WORDS ){
+    if( pRep->nWord>0 ){
+      beFmtInt((pRep->nWord + pRep->nActive/2)/pRep->nActive, zAvg);
+      snprintf(zLine, sizeof(zLine),
+               "You wrote on %d of %d days, averaging %s words.",
+               pRep->nActive, pRep->nDay, zAvg);
+    }else{
+      snprintf(zLine, sizeof(zLine), "You wrote on %d of %d days.",
+               pRep->nActive, pRep->nDay);
+    }
+  }else if( pRep->nActive>0 && pRep->nSec>0 ){
+    snprintf(zLine, sizeof(zLine), "About %s on each day you wrote.",
+             beFmtDuration(pRep->nSec/pRep->nActive, zAvg));
+  }
+  chartText(zLine, 0.0, yBig-20.0, NSTextAlignmentLeft,
+            chartAttr(pSmall, "secondaryLabelColor"));
+}
+
+/*
 ** Implementation of -[BeChartView drawRect:].
 */
 static void chartDraw(id self, SEL NotUsed, NSRect NotUsed2){
@@ -182,97 +341,93 @@ static void chartDraw(id self, SEL NotUsed, NSRect NotUsed2){
   NSRect b = msgRect(self, "bounds");
   CGContextRef c;                 /* The drawing context */
   id pAxisAttr;                   /* Text attributes of axis labels */
-  id pValueAttr;                  /* Text attributes of values on bars */
-  id pTitleAttr;                  /* Text attributes of the title */
-  double x0 = CHART_LEFT;         /* Left edge of the plot area */
-  double y0 = CHART_BOTTOM;       /* Bottom edge of the plot area */
-  double w = b.size.width - CHART_LEFT - CHART_RIGHT;
-  double h = b.size.height - CHART_TOP - CHART_BOTTOM;
+  id pAvgAttr;                    /* Text attributes of the "avg" label */
+  double x0 = 0.0;                /* Left edge of the plot */
+  double y0 = CHART_BOTTOM;       /* Bottom edge of the plot */
+  double w = b.size.width - CHART_GUTTER;
+  double h = b.size.height - CHART_HEAD - CHART_BOTTOM;
   double rSlot = w/pRep->nBucket; /* Width allotted to each bar */
   double rBar;                    /* Width of each bar */
   double rMax = 0.0;              /* Largest value */
+  double rSum = 0.0;              /* Sum of the values */
   double rTop;                    /* Value at the top of the axis */
-  double xPrev;                   /* Left edge of previous axis label */
-  int iMax = 0;                   /* Index of the largest value */
+  double yAvg = -100.0;           /* Height of the average line */
+  double xPrev;                   /* Left edge of previous bar label */
+  int nBar = 0;                   /* Number of bars that are not zero */
   int i;                          /* Loop counter */
-  char zBuf[32];                  /* A number rendered as text */
-  char zTitle[64];                /* The title of the chart */
+  char zBuf[40];                  /* A number rendered as text */
 
   UNUSED_PARAMETER(NotUsed);
   UNUSED_PARAMETER(NotUsed2);
   c = msg0(CGContextRef,
            msg0(id, cls("NSGraphicsContext"), "currentContext"), "CGContext");
-  pAxisAttr = beDict(NSFontAttributeName, beFont(10.0, NSFontWeightRegular, 1),
-                     NSForegroundColorAttributeName,
-                     beColor("secondaryLabelColor"));
-  pValueAttr = beDict(NSFontAttributeName,
-                      beFont(10.0, NSFontWeightRegular, 1),
-                      NSForegroundColorAttributeName, beColor("labelColor"));
-  pTitleAttr = beDict(NSFontAttributeName,
-                      beFont(12.0, NSFontWeightSemibold, 0),
-                      NSForegroundColorAttributeName, beColor("labelColor"));
+  pAxisAttr = chartAttr(beFont(10.0, NSFontWeightRegular, 1),
+                        "tertiaryLabelColor");
+  pAvgAttr = chartAttr(beFont(10.0, NSFontWeightMedium, 1),
+                       "controlAccentColor");
+  chartHeader(p, b);
 
   for(i=0; i<pRep->nBucket; i++){
     double r = chartValue(p, i);
-    if( r>rMax ){
-      rMax = r;
-      iMax = i;
+    if( r>rMax ) rMax = r;
+    if( r>0.0 ){
+      rSum += r;
+      nBar++;
     }
+  }
+  if( rMax<=0.0 ){
+    /* Nothing to chart.  Say what will make something appear. */
+    chartLine(c, x0, x0+w, y0+0.5, "separatorColor", 0);
+    chartText(p->eUnit==CHART_TIME
+                ? "Time appears here once the timer has run."
+                : "Words appear here as you write.",
+              x0+w/2.0, y0+h/2.0-8.0, NSTextAlignmentCenter,
+              chartAttr(beFont(12.0, NSFontWeightRegular, 0),
+                        "tertiaryLabelColor"));
+    return;
   }
   rTop = chartTop(rMax, p->eUnit);
 
-  /* The title */
-  snprintf(zTitle, sizeof(zTitle), "%s per %s",
-           p->eUnit==CHART_TIME ? "Time spent" : "Words written",
-           pRep->ePeriod==BE_YEAR ? "month" : "day");
-  chartText(zTitle, 0.0, b.size.height-16.0, NSTextAlignmentLeft, pTitleAttr);
+  /* A dashed line marks the average of the days that have a bar.  It
+  ** is labeled in the gutter. */
+  if( nBar>=2 ){
+    yAvg = y0 + h*(rSum/nBar)/rTop;
+  }
 
-  /* Grid lines at the half-way point and at the top, with their values */
-  CGContextSetFillColorWithColor(c,
-      msg0(CGColorRef, beColor("separatorColor"), "CGColor"));
+  /* Grid lines at the half-way point and at the top, labeled in the
+  ** gutter.  A label that would collide with "avg" is left out. */
   for(i=1; i<=2; i++){
     double y = y0 + h*i/2.0;
-    CGContextFillRect(c, CGRectMake(x0, y-0.5, w, 1.0));
-    chartText(chartFormat(p, rTop*i/2.0, zBuf), x0-8.0, y-6.0,
-              NSTextAlignmentRight, pAxisAttr);
+    chartLine(c, x0, x0+w, y+0.5, "separatorColor", 1);
+    if( y-yAvg<12.0 && yAvg-y<12.0 ) continue;
+    chartText(chartFormat(p->eUnit, (i64)(rTop*i/2.0), zBuf), x0+w+8.0,
+              y-6.0, NSTextAlignmentLeft, pAxisAttr);
   }
 
-  /* The bars */
+  /* The bars.  If the mouse is over one, the others fade. */
   rBar = rSlot*0.62;
-  if( rBar>26.0 ) rBar = 26.0;
+  if( rBar>28.0 ) rBar = 28.0;
   if( rBar>rSlot-2.0 ) rBar = rSlot-2.0;
   CGContextSetFillColorWithColor(c,
-      msg0(CGColorRef, beColor("systemBlueColor"), "CGColor"));
+      msg0(CGColorRef, beColor("controlAccentColor"), "CGColor"));
   for(i=0; i<pRep->nBucket; i++){
     double r = chartValue(p, i);
     double rHeight = h*r/rTop;
     if( r<=0.0 ) continue;
     if( rHeight<2.0 ) rHeight = 2.0;
+    CGContextSetAlpha(c, p->iHover>=0 && p->iHover!=i ? 0.3 : 1.0);
     chartBar(c, x0 + rSlot*(i+0.5) - rBar/2.0, y0, rBar, rHeight);
   }
+  CGContextSetAlpha(c, 1.0);
 
-  /* The values of the bars.  With only a few bars there is room to
-  ** print the value of each one.  Otherwise just the largest is
-  ** labeled; the rest can be read from the grid or from the tooltips.
-  ** This is a separate pass because drawing text changes the fill
-  ** color of the context. */
-  for(i=0; i<pRep->nBucket; i++){
-    double r = chartValue(p, i);
-    double rHeight = h*r/rTop;
-    if( r<=0.0 ) continue;
-    if( rHeight<2.0 ) rHeight = 2.0;
-    if( pRep->nBucket<=7 || i==iMax ){
-      chartText(chartFormat(p, r, zBuf), x0 + rSlot*(i+0.5),
-                y0+rHeight+3.0, NSTextAlignmentCenter, pValueAttr);
-    }
+  /* The baseline and the average, drawn over the bars */
+  chartLine(c, x0, x0+w, y0+0.5, "separatorColor", 0);
+  if( yAvg>0.0 ){
+    chartLine(c, x0, x0+w, yAvg+0.5, "controlAccentColor", 1);
+    chartText("avg", x0+w+8.0, yAvg-6.0, NSTextAlignmentLeft, pAvgAttr);
   }
 
-  /* The baseline, drawn after the bars so that it lies on top */
-  CGContextSetFillColorWithColor(c,
-      msg0(CGColorRef, beColor("tertiaryLabelColor"), "CGColor"));
-  CGContextFillRect(c, CGRectMake(x0, y0-0.5, w, 1.0));
-
-  /* Labels along the bottom.  Work from right to left so that the most
+  /* Labels under the bars.  Work from right to left so that the most
   ** recent bar always gets a label, and skip any label that would run
   ** into the one before. */
   xPrev = x0 + w + 100.0;
@@ -280,69 +435,55 @@ static void chartDraw(id self, SEL NotUsed, NSRect NotUsed2){
     const char *z = pRep->a[i].zLabel;
     double xMid = x0 + rSlot*(i+0.5);
     NSSize sz = msg1(NSSize, beStr(z), "sizeWithAttributes:", id, pAxisAttr);
-    if( xMid+sz.width/2.0 > b.size.width ){
-      xMid = b.size.width - sz.width/2.0;
-    }
-    if( xMid+sz.width/2.0 > xPrev-10.0 ) continue;
+    if( xMid+sz.width/2.0 > x0+w ) xMid = x0 + w - sz.width/2.0;
+    if( xMid+sz.width/2.0 > xPrev-12.0 ) continue;
     if( xMid-sz.width/2.0 < 0.0 ) continue;
     chartText(z, xMid, 3.0, NSTextAlignmentCenter, pAxisAttr);
     xPrev = xMid - sz.width/2.0;
   }
-
-  if( rMax<=0.0 ){
-    chartText("Nothing recorded", x0+w/2.0, y0+h/2.0-18.0,
-              NSTextAlignmentCenter, pAxisAttr);
-  }
 }
 
 /*
-** Implementation of -[BeChartView view:stringForToolTip:point:userData:].
-** Return the text of the tooltip for a bar.  The index of the bar was
-** supplied as the user data when the tooltip was registered.
+** The mouse is at point pt, in the coordinates of chart view pView.
+** Work out which bar it is over, if any, and redraw if that changed.
 */
-static id chartToolTip(id self, SEL NotUsed, id pView, long iTag, NSPoint pt,
-                       void *pData){
-  Chart *p = chartOf(self);
-  int i = (int)(long)pData;       /* Which bar */
-  const StatsBucket *pB;          /* The bucket for that bar */
-  char zVal[32];                  /* The value */
-  char zTip[100];                 /* The complete tooltip */
-
-  UNUSED_PARAMETER(NotUsed);
-  UNUSED_PARAMETER(pView);
-  UNUSED_PARAMETER(iTag);
-  UNUSED_PARAMETER(pt);
-  if( i<0 || i>=p->pReport->nBucket ) return S("");
-  pB = &p->pReport->a[i];
-  if( p->eUnit==CHART_TIME ){
-    snprintf(zTip, sizeof(zTip), "%s: %s", pB->zLong,
-             beFmtDuration(pB->nSec, zVal));
-  }else{
-    snprintf(zTip, sizeof(zTip), "%s: %s %s", pB->zLong,
-             beFmtInt(pB->nWord, zVal), pB->nWord==1 ? "word" : "words");
-  }
-  return beStr(zTip);
-}
-
-/*
-** Register one tooltip for each bar of chart view pView.  The area
-** that triggers a tooltip is the full height of the plot and the full
-** width allotted to the bar, which is easier to hit than the bar is.
-*/
-static void chartSetToolTips(id pView){
+static void chartHoverAt(id pView, NSPoint pt){
   Chart *p = chartOf(pView);
   NSRect b = msgRect(pView, "bounds");
-  double w = b.size.width - CHART_LEFT - CHART_RIGHT;
-  double h = b.size.height - CHART_TOP - CHART_BOTTOM;
-  double rSlot = w/p->pReport->nBucket;
-  int i;                          /* Loop counter */
+  double w = b.size.width - CHART_GUTTER;
+  double yTop = b.size.height - CHART_HEAD + 6.0;
+  int iHover = -1;                /* The bar under the mouse */
 
-  msg0(void, pView, "removeAllToolTips");
-  for(i=0; i<p->pReport->nBucket; i++){
-    NSRect r = CGRectMake(CHART_LEFT + rSlot*i, CHART_BOTTOM, rSlot, h);
-    msg3(long, pView, "addToolTipRect:owner:userData:",
-         NSRect, r, id, pView, void*, (void*)(long)i);
+  if( pt.x>=0.0 && pt.x<w && pt.y>=0.0 && pt.y<yTop ){
+    iHover = (int)(pt.x*p->pReport->nBucket/w);
+    if( iHover>=p->pReport->nBucket ) iHover = p->pReport->nBucket - 1;
   }
+  if( iHover!=p->iHover ){
+    p->iHover = iHover;
+    msg1(void, pView, "setNeedsDisplay:", BOOL, YES);
+  }
+}
+
+/*
+** Implementation of -[BeChartView mouseMoved:].
+*/
+static void chartMouseMoved(id self, SEL NotUsed, id pEvent){
+  NSPoint pt = msg0(NSPoint, pEvent, "locationInWindow");
+  UNUSED_PARAMETER(NotUsed);
+  pt = msg2(NSPoint, self, "convertPoint:fromView:", NSPoint, pt, id, (id)0);
+  chartHoverAt(self, pt);
+}
+
+/*
+** Implementation of -[BeChartView mouseExited:].
+*/
+static void chartMouseExited(id self, SEL NotUsed, id pEvent){
+  NSPoint pt;
+  UNUSED_PARAMETER(NotUsed);
+  UNUSED_PARAMETER(pEvent);
+  pt.x = -1.0;
+  pt.y = -1.0;
+  chartHoverAt(self, pt);
 }
 
 /*
@@ -359,15 +500,18 @@ static void chartDealloc(id self, SEL cmd){
 
 /*
 ** Create a chart view with frame r that displays the current report in
-** units of eUnit.  The caller owns the result.
+** units of eUnit.  The view asks to be told when the mouse moves over
+** it.  The caller owns the result.
 */
 static id chartNew(NSRect r, int eUnit){
   id pView;                       /* The new view */
+  id pArea;                       /* Its mouse tracking area */
   Chart *p;                       /* Its chart */
 
   p = calloc(1, sizeof(*p));
   if( p==0 ) return 0;
   p->eUnit = eUnit;
+  p->iHover = -1;
   p->pReport = &sw.report;
   pView = msg0(id, cls("BeChartView"), "alloc");
   pView = msg1(id, pView, "initWithFrame:", NSRect, r);
@@ -376,58 +520,109 @@ static id chartNew(NSRect r, int eUnit){
     return 0;
   }
   chartOf(pView) = p;
+  pArea = msg0(id, cls("NSTrackingArea"), "alloc");
+  pArea = msg4(id, pArea, "initWithRect:options:owner:userInfo:",
+               NSRect, CGRectZero,
+               unsigned long, NSTrackingMouseEnteredAndExited
+                              | NSTrackingMouseMoved
+                              | NSTrackingActiveAlways
+                              | NSTrackingInVisibleRect,
+               id, pView, id, (id)0);
+  msg1(void, pView, "addTrackingArea:", id, pArea);
+  msg0(void, pArea, "release");
   return pView;
 }
 
 /*
-** Create the BeChartView class.
+** Implementation of -[BeStatsController statsPeriod:], the action of
+** the Week/Month/Year control.
+*/
+static void ctrlPeriod(id self, SEL NotUsed, id pSender){
+  UNUSED_PARAMETER(self);
+  UNUSED_PARAMETER(NotUsed);
+  beStatsWinSetPeriod((int)msg0(long, pSender, "selectedSegment"));
+}
+
+/*
+** Implementation of -[BeStatsController windowDidBecomeKey:].  Bring
+** the statistics up to date whenever the window comes to the front.
+*/
+static void ctrlDidBecomeKey(id self, SEL NotUsed, id pNote){
+  UNUSED_PARAMETER(self);
+  UNUSED_PARAMETER(NotUsed);
+  UNUSED_PARAMETER(pNote);
+  beStatsWinRefresh();
+}
+
+/*
+** Implementation of the three methods of the toolbar delegate.  The
+** toolbar holds a single item, which is the period control.
+*/
+static id ctrlToolbarItem(id self, SEL NotUsed, id pToolbar, id zIdent,
+                          BOOL bInsert){
+  id pItem;
+  UNUSED_PARAMETER(self);
+  UNUSED_PARAMETER(NotUsed);
+  UNUSED_PARAMETER(pToolbar);
+  UNUSED_PARAMETER(bInsert);
+  pItem = msg0(id, cls("NSToolbarItem"), "alloc");
+  pItem = msg1(id, pItem, "initWithItemIdentifier:", id, zIdent);
+  msg1(void, pItem, "setView:", id, sw.pPeriod);
+  msg1(void, pItem, "setLabel:", id, S("Period"));
+  return msg0(id, pItem, "autorelease");
+}
+static id ctrlToolbarIdents(id self, SEL NotUsed, id pToolbar){
+  UNUSED_PARAMETER(self);
+  UNUSED_PARAMETER(NotUsed);
+  UNUSED_PARAMETER(pToolbar);
+  return msg1(id, cls("NSArray"), "arrayWithObject:", id, SW_PERIOD_ITEM);
+}
+
+/*
+** Create the BeChartView and BeStatsController classes.
 */
 void beStatsWinRegister(void){
   Class pClass;                   /* The new class */
+
   pClass = objc_allocateClassPair(objc_getClass("NSView"), "BeChartView", 0);
   class_addIvar(pClass, "pChart", sizeof(Chart*), 3, "^v");
   class_addMethod(pClass, sel_registerName("drawRect:"),
                   (IMP)chartDraw, "v@:" BE_RECT);
-  class_addMethod(pClass,
-                  sel_registerName("view:stringForToolTip:point:userData:"),
-                  (IMP)chartToolTip, "@@:@q" BE_POINT "^v");
+  class_addMethod(pClass, sel_registerName("mouseMoved:"),
+                  (IMP)chartMouseMoved, "v@:@");
+  class_addMethod(pClass, sel_registerName("mouseExited:"),
+                  (IMP)chartMouseExited, "v@:@");
   class_addMethod(pClass, sel_registerName("dealloc"),
                   (IMP)chartDealloc, "v@:");
   objc_registerClassPair(pClass);
   chartIvar = class_getInstanceVariable(pClass, "pChart");
+
+  pClass = objc_allocateClassPair(objc_getClass("NSObject"),
+                                  "BeStatsController", 0);
+  class_addMethod(pClass, sel_registerName("statsPeriod:"),
+                  (IMP)ctrlPeriod, "v@:@");
+  class_addMethod(pClass, sel_registerName("windowDidBecomeKey:"),
+                  (IMP)ctrlDidBecomeKey, "v@:@");
+  class_addMethod(pClass,
+      sel_registerName("toolbar:itemForItemIdentifier:"
+                       "willBeInsertedIntoToolbar:"),
+      (IMP)ctrlToolbarItem, "@@:@@" BE_BOOL);
+  class_addMethod(pClass, sel_registerName("toolbarDefaultItemIdentifiers:"),
+                  (IMP)ctrlToolbarIdents, "@@:@");
+  class_addMethod(pClass, sel_registerName("toolbarAllowedItemIdentifiers:"),
+                  (IMP)ctrlToolbarIdents, "@@:@");
+  objc_registerClassPair(pClass);
 }
 
 /*
-** Build the statistics window.
+** Create the Week/Month/Year control and select the period that was
+** showing the last time the window was used.
 */
-static void statsWinBuild(void){
-  static const char *azCaption[SW_NTILE] = {
-    "Words written", "Time spent", "Days active", "Words per active day"
-  };
-  id pRoot;                       /* The content view of the window */
-  id pLabels;                     /* Titles of the period selector */
-  id aTitle[3];                   /* The same, as a C array */
-  double rTile;                   /* Width of each headline number */
-  double y;                       /* Top of the next thing to be added */
-  int i;                          /* Loop counter */
+static void statsWinBuildPeriod(void){
+  id aTitle[3];                   /* Titles of the segments */
   CFPropertyListRef pSaved;       /* The saved period */
+  int i;                          /* Loop counter */
 
-  sw.pWin = msg0(id, cls("NSWindow"), "alloc");
-  sw.pWin = msg4(id, sw.pWin, "initWithContentRect:styleMask:backing:defer:",
-                 NSRect, CGRectMake(0.0, 0.0, SW_WIDTH, SW_HEIGHT),
-                 unsigned long, NSWindowStyleMaskTitled
-                                | NSWindowStyleMaskClosable
-                                | NSWindowStyleMaskMiniaturizable,
-                 unsigned long, NSBackingStoreBuffered,
-                 BOOL, YES);
-  msg1(void, sw.pWin, "setReleasedWhenClosed:", BOOL, NO);
-  msg1(void, sw.pWin, "setTitle:", id, S("Writing Statistics"));
-  msg1(void, sw.pWin, "setDelegate:", id, beDelegate);
-  msg0(void, sw.pWin, "center");
-  msg1(BOOL, sw.pWin, "setFrameAutosaveName:", id, S("BeStatistics"));
-  pRoot = msg0(id, sw.pWin, "contentView");
-
-  /* The period selector, centered at the top */
   pSaved = CFPreferencesCopyAppValue(SW_PERIOD_KEY,
                                      kCFPreferencesCurrentApplication);
   if( pSaved ){
@@ -440,38 +635,75 @@ static void statsWinBuild(void){
   aTitle[0] = S("Week");
   aTitle[1] = S("Month");
   aTitle[2] = S("Year");
-  pLabels = msg2(id, cls("NSArray"), "arrayWithObjects:count:",
-                 id*, aTitle, unsigned long, 3);
   sw.pPeriod = msg4(id, cls("NSSegmentedControl"),
                     "segmentedControlWithLabels:trackingMode:target:action:",
-                    id, pLabels, unsigned long, 0, id, beDelegate,
+                    id, msg2(id, cls("NSArray"), "arrayWithObjects:count:",
+                             id*, aTitle, unsigned long, 3),
+                    unsigned long, 0, id, sw.pCtrl,
                     SEL, sel_registerName("statsPeriod:"));
-  y = SW_HEIGHT - 18.0;
-  msg1(void, sw.pPeriod, "setFrame:", NSRect,
-       CGRectMake((SW_WIDTH-240.0)/2.0, y-24.0, 240.0, 24.0));
-  msg1(void, sw.pPeriod, "setSelectedSegment:", long, sw.ePeriod);
-  msg1(void, pRoot, "addSubview:", id, sw.pPeriod);
-  y -= 24.0 + 22.0;
-
-  /* The headline numbers, each with a caption underneath */
-  rTile = (SW_WIDTH - 2.0*SW_MARGIN)/SW_NTILE;
-  for(i=0; i<SW_NTILE; i++){
-    double x = SW_MARGIN + rTile*i;
-    id pCaption;
-    sw.aValue[i] = beLabel(CGRectMake(x, y-30.0, rTile-8.0, 30.0), 24.0,
-                           NSFontWeightSemibold, "labelColor", 0);
-    msg1(void, pRoot, "addSubview:", id, sw.aValue[i]);
-    pCaption = beLabel(CGRectMake(x, y-48.0, rTile-8.0, 16.0), 11.0,
-                       NSFontWeightRegular, "secondaryLabelColor", 0);
-    beSetText(pCaption, azCaption[i]);
-    msg1(void, pRoot, "addSubview:", id, pCaption);
+  msg0(id, sw.pPeriod, "retain");
+  for(i=0; i<3; i++){
+    msg2(void, sw.pPeriod, "setWidth:forSegment:", double, 72.0, long, i);
   }
+  msg1(void, sw.pPeriod, "setSelectedSegment:", long, sw.ePeriod);
+}
 
-  /* The two charts, at the bottom */
+/*
+** Build the statistics window.
+*/
+static void statsWinBuild(void){
+  id pRoot;                       /* The content view of the window */
+  id pBar;                        /* The toolbar */
+  int i;                          /* Loop counter */
+
+  sw.pCtrl = beNew("BeStatsController");
+  statsWinBuildPeriod();
+
+  sw.pWin = msg0(id, cls("NSWindow"), "alloc");
+  sw.pWin = msg4(id, sw.pWin, "initWithContentRect:styleMask:backing:defer:",
+                 NSRect, CGRectMake(0.0, 0.0, SW_WIDTH, SW_HEIGHT),
+                 unsigned long, NSWindowStyleMaskTitled
+                                | NSWindowStyleMaskClosable
+                                | NSWindowStyleMaskMiniaturizable,
+                 unsigned long, NSBackingStoreBuffered,
+                 BOOL, YES);
+  msg1(void, sw.pWin, "setReleasedWhenClosed:", BOOL, NO);
+  msg1(void, sw.pWin, "setTitle:", id, S("Writing Statistics"));
+  msg1(void, sw.pWin, "setDelegate:", id, sw.pCtrl);
+
+  /* The period control sits in the middle of the toolbar, where the
+  ** title of the window would otherwise be. */
+  pBar = msg0(id, cls("NSToolbar"), "alloc");
+  pBar = msg1(id, pBar, "initWithIdentifier:", id, S("BeStatistics"));
+  msg1(void, pBar, "setDelegate:", id, sw.pCtrl);
+  msg1(void, pBar, "setDisplayMode:", unsigned long,
+       NSToolbarDisplayModeIconOnly);
+  msg1(void, pBar, "setAllowsUserCustomization:", BOOL, NO);
+  if( msg1(BOOL, pBar, "respondsToSelector:",
+           SEL, sel_registerName("setCenteredItemIdentifiers:")) ){
+    msg1(void, pBar, "setCenteredItemIdentifiers:", id,
+         msg1(id, cls("NSSet"), "setWithObject:", id, SW_PERIOD_ITEM));
+  }else{
+    msg1(void, pBar, "setCenteredItemIdentifier:", id, SW_PERIOD_ITEM);
+  }
+  msg1(void, sw.pWin, "setTitleVisibility:", long, NSWindowTitleHidden);
+  msg1(void, sw.pWin, "setToolbarStyle:", long, NSWindowToolbarStyleUnified);
+  msg1(void, sw.pWin, "setToolbar:", id, pBar);
+  msg0(void, pBar, "release");
+
+  /* Adding a toolbar changes how much of the window is left for the
+  ** content, so set the size of the content again. */
+  msg1(void, sw.pWin, "setContentSize:", NSSize,
+       CGSizeMake(SW_WIDTH, SW_HEIGHT));
+  msg0(void, sw.pWin, "center");
+  msg1(BOOL, sw.pWin, "setFrameAutosaveName:", id, S("BeStatsWindow"));
+
+  /* The two panels: words above, time below */
+  pRoot = msg0(id, sw.pWin, "contentView");
   for(i=0; i<2; i++){
     NSRect r = CGRectMake(SW_MARGIN,
-                          SW_MARGIN + (1-i)*(SW_CHART_HEIGHT + 20.0),
-                          SW_WIDTH - 2.0*SW_MARGIN, SW_CHART_HEIGHT);
+                          SW_BOTTOM + (1-i)*(SW_PANEL + SW_GAP),
+                          SW_WIDTH - 2.0*SW_MARGIN, SW_PANEL);
     sw.aChart[i] = chartNew(r, i==0 ? CHART_WORDS : CHART_TIME);
     msg1(void, pRoot, "addSubview:", id, sw.aChart[i]);
     msg0(void, sw.aChart[i], "release");
@@ -483,32 +715,12 @@ static void statsWinBuild(void){
 ** a no-op if the statistics window is not on screen.
 */
 void beStatsWinRefresh(void){
-  StatsReport *p = &sw.report;
-  char zBuf[32];                  /* A number rendered as text */
-  char zText[64];                 /* The text of a headline number */
   int i;                          /* Loop counter */
-
   if( sw.pWin==0 || !msg0(BOOL, sw.pWin, "isVisible") ) return;
-  beStatsReport(sw.ePeriod, p);
-
-  if( p->nWord<0 ){
-    snprintf(zText, sizeof(zText), MINUS "%s", beFmtInt(-p->nWord, zBuf));
-  }else{
-    beFmtInt(p->nWord, zText);
-  }
-  beSetText(sw.aValue[0], zText);
-  beSetText(sw.aValue[1], beFmtDuration(p->nSec, zText));
-  snprintf(zText, sizeof(zText), "%d of %d", p->nActive, p->nDay);
-  beSetText(sw.aValue[2], zText);
-  if( p->nActive>0 && p->nWord>0 ){
-    beFmtInt((p->nWord + p->nActive/2)/p->nActive, zText);
-  }else{
-    snprintf(zText, sizeof(zText), EMDASH);
-  }
-  beSetText(sw.aValue[3], zText);
-
+  beStatsReport(sw.ePeriod, &sw.report);
   for(i=0; i<2; i++){
-    chartSetToolTips(sw.aChart[i]);
+    Chart *p = chartOf(sw.aChart[i]);
+    if( p->iHover>=sw.report.nBucket ) p->iHover = -1;
     msg1(void, sw.aChart[i], "setNeedsDisplay:", BOOL, YES);
   }
 }
@@ -520,9 +732,14 @@ void beStatsWinRefresh(void){
 */
 void beStatsWinSetPeriod(int ePeriod){
   CFNumberRef pNum;               /* The period as a CFNumber */
+  int i;                          /* Loop counter */
+
   if( ePeriod<BE_WEEK || ePeriod>BE_YEAR ) return;
   sw.ePeriod = ePeriod;
   msg1(void, sw.pPeriod, "setSelectedSegment:", long, ePeriod);
+  for(i=0; i<2; i++){
+    if( sw.aChart[i] ) chartOf(sw.aChart[i])->iHover = -1;
+  }
   pNum = CFNumberCreate(0, kCFNumberIntType, &ePeriod);
   if( pNum ){
     CFPreferencesSetAppValue(SW_PERIOD_KEY, pNum,
@@ -544,10 +761,15 @@ void beStatsWinShow(void){
 }
 
 /*
-** Test interface: return the statistics window.
+** Test interfaces: return the statistics window, and act as if the
+** mouse were over bar iBar of panel iChart.
 */
 #ifdef BE_TEST
 void *beTestStatsWindow(void){
   return sw.pWin;
+}
+void beTestStatsHover(int iChart, int iBar){
+  chartOf(sw.aChart[iChart])->iHover = iBar;
+  msg1(void, sw.aChart[iChart], "setNeedsDisplay:", BOOL, YES);
 }
 #endif

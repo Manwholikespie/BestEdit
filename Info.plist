@@ -10,6 +10,10 @@
   <string>com.bestedit.BestEdit</string>
   <key>CFBundleExecutable</key>
   <string>BestEdit</string>
+  <key>CFBundleIconFile</key>
+  <string>BestEdit</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Made by Robert Dominguez</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleInfoDictionaryVersion</key>

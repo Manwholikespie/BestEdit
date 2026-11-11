@@ -102,6 +102,8 @@ struct StatsReport {
   i64 nDeleted;           /* Total words removed */
   i64 nWord;              /* Net words written: nAdded - nDeleted */
   i64 nSec;               /* Total seconds with the timer running */
+  i64 nPrevWord;          /* Net words in the period before this one */
+  i64 nPrevSec;           /* Seconds in the period before this one */
   StatsBucket a[BE_MX_BUCKET];   /* Oldest bucket first */
 };
 
@@ -185,6 +187,7 @@ void *beTestDocAttr(void*);
 i64 beTestDocWords(void*, i64*);
 void beRtfTest(void);
 void *beTestStatsWindow(void);
+void beTestStatsHover(int, int);
 #endif
 
 #endif /* BESTEDIT_H */

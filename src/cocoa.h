@@ -135,6 +135,15 @@ struct NSRange {
 #define NSTextFinderActionSetSearchString       7
 #define NSTextFinderActionShowReplaceInterface  12
 
+#define NSTrackingMouseEnteredAndExited 0x01
+#define NSTrackingMouseMoved            0x02
+#define NSTrackingActiveAlways          0x80
+#define NSTrackingInVisibleRect         0x200
+
+#define NSWindowTitleHidden             1
+#define NSWindowToolbarStyleUnified     3
+#define NSToolbarDisplayModeIconOnly    2
+
 #define NSBoxSeparator                  2
 #define NSImageOnly                     1
 #define NSLineBreakByTruncatingTail     4
@@ -157,7 +166,9 @@ extern id NSDocumentTypeDocumentAttribute;
 extern id NSRTFTextDocumentType;
 extern id NSAppearanceNameAqua;
 extern id NSCocoaErrorDomain;
+extern id NSFontDescriptorSystemDesignRounded;
 extern const double NSFontWeightRegular;
+extern const double NSFontWeightMedium;
 extern const double NSFontWeightSemibold;
 extern id NSSearchPathForDirectoriesInDomains(unsigned long, unsigned long,
                                               BOOL);
