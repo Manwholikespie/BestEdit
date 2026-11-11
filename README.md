@@ -2,11 +2,9 @@
 
 I learned to type on TextEdit. For a time it was my favorite place to
 write. At some point I started preferring Markdown editors, first nvALT
-then Ulysses.
-
-For some forms of writing, though, I can't stand Markdown. The editors
-have too many distracting features. The font is always monospace. It's
-difficult to visualize the form your words are taking.
+then Ulysses. For some forms of writing, though, I can't stand Markdown.
+The editors have too many distracting features. The font is always
+monospace. It's difficult to visualize the form your words are taking.
 
 I wanted TextEdit, but with a word count. Oh, and I suppose a timer
 might be good motivation so I threw that in too. Figured C was tasteful
